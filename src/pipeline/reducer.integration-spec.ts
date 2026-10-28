@@ -125,6 +125,19 @@ describe('Reducer (F3 / C1 / C4 / C5 / C3)', () => {
     expect((await snapshot())?.blocked).toBe(true);
   });
 
+  it('creates a blocked snapshot when the patient FIRST event fails (no prior snapshot)', async () => {
+    // nothing ready, no snapshot yet, and the head of the history is a failed event: the block
+    // must still be visible, not silently absent (a patient stuck from its very first event).
+    await insert('a', 1, 'failed');
+
+    await reducer.run('p1');
+
+    const snap = await snapshot();
+    expect(snap?.blocked).toBe(true);
+    expect(snap?.appliedThrough).toBeNull();
+    expect(snap?.state.appliedCount).toBe(0);
+  });
+
   it('reconciles an orphan: a ready event not yet folded gets folded on the next run (C5)', async () => {
     // simulate a crash after the snapshot write but before markFolded
     await insert('a', 1, 'ready', { v: 1 });

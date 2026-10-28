@@ -45,14 +45,25 @@ export class Reducer {
       appliedThrough: snap?.appliedThrough ?? null,
     });
 
-    // A retroactive gap behind the cursor, or nothing ready yet: keep the state; only the
-    // blocked flag may need to move on an existing snapshot (C4).
+    // A retroactive gap behind the cursor, or nothing ready yet: keep any published state.
     if (plan.regress || plan.appliedThrough === null) {
-      if (snap && snap.blocked !== plan.blocked) {
-        await this.repo.saveSnapshot(patientId, snap.version, {
-          state: snap.state,
-          appliedThrough: snap.appliedThrough,
-          blocked: plan.blocked,
+      if (snap) {
+        // only the blocked flag may need to move on the existing snapshot (C4)
+        if (snap.blocked !== plan.blocked) {
+          await this.repo.saveSnapshot(patientId, snap.version, {
+            state: snap.state,
+            appliedThrough: snap.appliedThrough,
+            blocked: plan.blocked,
+          });
+        }
+      } else if (plan.blocked) {
+        // No snapshot yet and the head of the history is a failed event: the patient's very first
+        // event failed. Create a blocked snapshot so the block is VISIBLE, not silently absent -
+        // otherwise /stats and any consumer would see nothing at all for a patient that is stuck.
+        await this.repo.saveSnapshot(patientId, 0, {
+          state: plan.state,
+          appliedThrough: null,
+          blocked: true,
         });
       }
       return;
