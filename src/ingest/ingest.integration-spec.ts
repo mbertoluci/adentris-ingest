@@ -123,6 +123,18 @@ describe('POST /events (C6/C7/C12/C13)', () => {
     expect(await eventCount()).toBe(0);
   });
 
+  it('still enforces the C13 input guard WITH an Idempotency-Key (no validation bypass)', async () => {
+    // the occurrence-id path does not hash data, so the hostile-input walk must run independently:
+    // a $-prefixed key must be rejected whether or not a key is present.
+    const res = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'op-hostile')
+      .send({ ...valid(), data: { $gt: 1 } });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_failed');
+    expect(await eventCount()).toBe(0);
+  });
+
   it('treats a patientId differing only by Unicode form as the same patient (NFC)', async () => {
     // "José" composed (NFC) vs "Jose" + combining acute (NFD): same identity after NFC, so the
     // dedup key and the stored/grouped patientId must agree - one event, stored in NFC form.

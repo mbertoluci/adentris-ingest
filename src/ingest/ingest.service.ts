@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { canonicalJSON } from '../domain/canonical';
 import { CLOCK } from '../common/clock';
 import { InvalidInputError } from '../domain/errors';
 import { eventId, occurrenceId } from '../domain/event-id';
@@ -34,6 +35,11 @@ export class IngestService {
     if (data === null || typeof data !== 'object' || Array.isArray(data)) {
       throw new InvalidInputError('data must be a plain object');
     }
+    // C13 must hold no matter how identity is derived. The content-hash path walks `data` inside
+    // eventId, but the occurrence-id path (Idempotency-Key) hashes only the key, so without this
+    // the hostile-input guard (depth/node caps, $/dotted/prototype keys, non-finite) would be
+    // bypassed by simply sending a key. Validate the payload here, independently of the id strategy.
+    canonicalJSON(data);
 
     const now = this.clock.now();
     const ts = parseEventTs(dto.ts, now);
