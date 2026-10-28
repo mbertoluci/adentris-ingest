@@ -54,7 +54,9 @@ curl -s -XPOST localhost:3000/events -H 'content-type: application/json' \
 
 curl -s localhost:3000/stats
 # -> {"startedAt":"...","updatedAt":"...","counts":{"queued":0,"processing":0,"ready":1,"failed":0},
-#     "oldestUnresolvedAgeMs":0}   (updatedAt is null until the first reaper tick)
+#     "oldestUnresolvedAgeMs":0}   (updatedAt is null until the first refresh; the age counts any
+#     unsettled event - queued, processing, or ready-but-not-yet-folded - so a stalled second stage
+#     cannot hide behind a healthy gauge)
 ```
 
 ## Test it
@@ -70,16 +72,27 @@ npm test                # unit (pure domain) + integration (real Mongo)
 npm run test:unit       # pure domain only, no Mongo, sub-second
 npm run test:integration # integration only, against in-memory Mongo
 npm run chaos           # standalone crash demo (needs `docker compose up -d mongo` first)
+CHAOS_MODE=paced npm run chaos   # sustained-load variant at the real ~5s delay
 ```
 
 `npm run chaos` bursts duplicated, out-of-order events, SIGKILLs the service mid-flight, restarts
-it, and asserts conservation once the queue drains: every acknowledged event is persisted exactly
-once, nothing is left queued/processing, and no ready event is left unfolded.
+it, and once the queue drains asserts **conservation and per-patient order**: every acknowledged
+event is persisted exactly once (by id-set, not just count), nothing is left queued/processing or
+ready-but-unfolded, and each patient's folded state matches an independent in-order computation (a
+scrambled fold fails the oracle, not only a miscount). `CHAOS_MODE=paced` runs the same assertions
+under a paced send at the real ~5s external delay with a mid-run crash, and reports the achieved
+rate and drain time (`PATIENTS`, `EVENTS_PER_PATIENT`, `RATE_PER_MIN`, `EXTERNAL_MS`, `CONCURRENCY`
+are overridable). It reports its run, it does not extrapolate to hours.
 
 ## HTTP contract
 
 The error body is `{ "error": { "code": "<code>" } }` with a fixed `code`. The `status` in a `202`
 body is the event's state (`queued|processing|ready|failed`), not the HTTP status.
+
+An optional `Idempotency-Key` request header sets the event's identity: when present, two deliveries
+with the same key (same patient) are the same event even if the body or `ts` drift on a retry, and
+two distinct observations that happen to share a body stay separate. Without it, the identity is the
+content hash (see Known limitations). The body contract is unchanged, so the header is purely additive.
 
 | Status | `code` | When | Sender should |
 |--------|--------|------|---------------|
@@ -135,17 +148,23 @@ one reads) would cost more on the heaviest criterion than a documented cut.
 
 ## Known limitations
 
-- **No `Idempotency-Key` from the sender.** Dedup is by content hash, so a retry that regenerates
-  the `ts` hashes differently and counts twice, and two genuinely-identical events collapse into
-  one. A sender-supplied key is the only real fix; the premise is that a retry repeats the body.
+- **Identity without a key falls back to content hash.** An optional `Idempotency-Key` gives true
+  occurrence identity (above); without it, dedup is by content hash, so a retry that regenerates the
+  `ts` would hash differently (counted twice) and two genuinely-identical events would collapse into
+  one. The content-hash premise is that a retry repeats the body; the key removes the premise for
+  any sender that can set it.
 - **`ts` does not guarantee absolute order** (ms ties, unbounded delay, clock skew). Ties break by
   `eventId` - stable but clinically arbitrary. Strict ordering would need a per-patient authoritative
   sequence.
 - **The external call is at-least-once** unless its destination deduplicates by `eventId`; the Mongo
-  effect is exactly-once.
+  effect is exactly-once. The lease is a wall-clock `Date`, so severe clock skew across instances can
+  make a reclaim (and thus a second external call) fire early - the at-least-once case becomes more
+  common, not just crash-triggered. A shared clock source or a monotonic fence bound would tighten it.
 - **Per-patient fold is O(history)**, recomputed under an optimistic version CAS (not an exclusive
   lock): the one scaling limit, addressed by an incremental fold next (the pure fold is designed to
-  be swapped). See the design notes.
+  be swapped). The recovery sweep no longer *re-triggers* that refold for an already-blocked patient
+  (bounded by the failed-event index), so the O(history) cost is paid on real state change, not every
+  tick. See the design notes.
 - **Single-node Mongo, atomicity per document** (no multi-document transaction, by design): the
   single document is the unit of work; consistency comes from idempotency + write order + reaper.
 

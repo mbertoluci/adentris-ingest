@@ -55,7 +55,11 @@ semantics never leak up and the method names read as the guard list.
   classes with fakes - the zombie-fencing and crash-recovery cases are deterministic, driven
   tick by tick, with no sleeps.
 - **The chaos script** is the end-to-end crash proof and lives outside `npm test` (it needs
-  Docker, a port, a real SIGKILL and a real clock - the usual flakiness sources).
+  Docker, a port, a real SIGKILL and a real clock - the usual flakiness sources). Its oracle asserts
+  per-patient order, not only counts: each patient's folded state must match an independent in-order
+  computation, so a scrambled fold fails it. A `CHAOS_MODE=paced` variant runs the same assertions
+  under a paced send at the real ~5s delay with a mid-run crash, and reports the achieved rate and
+  drain time rather than extrapolating.
 
 ## Capacity
 
@@ -77,8 +81,12 @@ discarded by the CAS. A patient with a long history and a hot event rate is ther
 bottleneck, and it grows with time, independent of hardware. The defence already in place is a pure
 fold plus an ordered replay designed so the reducer can be swapped; the next step is an incremental
 fold that applies only the new tail (a late event behind the cursor still needs a bounded recompute
-from a checkpoint). Secondary scans (`findPatientsWithFailed`, the orphan sweep) would want
-dedicated indexes before they matter. Storage tiering (archiving folded history) is a later concern.
+from a checkpoint). The recovery sweep itself is bounded: failed-patient discovery runs on a partial
+index (cardinality = failed events, not history), and a patient whose snapshot is already blocked is
+dropped from the sweep, so the reaper never re-pays an O(history) refold tick after tick for a
+permanently blocked patient. The gauge aggregate (`countsByStatus`) runs on its own loop, off the
+reaper's recovery path, so it can never delay lease recovery. Storage tiering (archiving folded
+history, which would also bound that aggregate) is a later concern.
 
 ## Where the detail lives
 
