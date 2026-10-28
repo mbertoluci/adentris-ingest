@@ -248,6 +248,57 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
     expect(result.reduced).toBe(0);
   });
 
+  it('does not refold a blocked patient for a ready event stranded behind the failed gap', async () => {
+    const clock = new MutableClock(at(100));
+    // first event failed (blocked, no published prefix), then a later ready event arrives: it sits
+    // strictly after the failed gap and can never fold until the gap is requeued. It must NOT drive
+    // a full-history refold every tick.
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'a', patientId: 'p1', type: 't', data: {},
+      ts: at(5), receivedAt: at(5), status: 'failed', folded: false, attempts: MAX_ATTEMPTS,
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'b', patientId: 'p1', type: 't', data: {},
+      ts: at(10), receivedAt: at(10), status: 'ready', folded: false, attempts: 0, effect: {},
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'snapshot', patientId: 'p1', version: 1,
+      state: { appliedCount: 0, lastType: null, values: {} }, appliedThrough: null, blocked: true,
+    });
+
+    const reduction = new RecordingReduction();
+    const result = await new Reaper(repo, clock, reduction, MAX_ATTEMPTS).tick();
+
+    expect(reduction.calls).toEqual([]); // stranded ready is not a sweep target
+    expect(result.reduced).toBe(0);
+  });
+
+  it('still sweeps a genuine C5 orphan inside a blocked patient prefix', async () => {
+    const clock = new MutableClock(at(100));
+    // published prefix through b (ts=10), a later failed gap makes the snapshot blocked, and b is a
+    // crash orphan (snapshot written, markFolded not reached): b is WITHIN the prefix, so it must
+    // still be reconciled.
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'b', patientId: 'p1', type: 't', data: {},
+      ts: at(10), receivedAt: at(10), status: 'ready', folded: false, attempts: 0, effect: {},
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'c', patientId: 'p1', type: 't', data: {},
+      ts: at(15), receivedAt: at(15), status: 'failed', folded: false, attempts: MAX_ATTEMPTS,
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'snapshot', patientId: 'p1', version: 1,
+      state: { appliedCount: 1, lastType: 't', values: {} },
+      appliedThrough: { ts: at(10), eventId: 'b' }, blocked: true,
+    });
+
+    const reduction = new RecordingReduction();
+    const result = await new Reaper(repo, clock, reduction, MAX_ATTEMPTS).tick();
+
+    expect(reduction.calls).toEqual(['p1']); // in-prefix orphan is still reconciled
+    expect(result.reduced).toBe(1);
+  });
+
   it('a throwing reduction for one patient does not abort the tick (C15)', async () => {
     for (const [eventId, patientId] of [
       ['e1', 'pA'],

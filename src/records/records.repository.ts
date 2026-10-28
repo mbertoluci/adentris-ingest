@@ -7,6 +7,7 @@ import {
 } from 'mongodb';
 import { IndexConflict, PersistenceUnavailable } from '../common/errors/app-exception';
 import { MongoService } from '../database/mongo.service';
+import { Cursor } from '../domain/reduce';
 import {
   EventDoc,
   EventStatus,
@@ -193,13 +194,57 @@ export class RecordsRepository {
     return (doc as EventDoc | null)?.receivedAt ?? null;
   }
 
-  /** Reaper sweep (b): patients with a ready event not yet folded (crash between stages, C5). */
+  /**
+   * Reaper sweep (b): patients with a genuine ready orphan - a ready event not yet folded that sits
+   * WITHIN the already-published prefix (the C5 crash between the snapshot write and markFolded).
+   *
+   * A ready event stranded strictly AFTER a failed gap is also `ready & folded:false`, but it cannot
+   * fold until the gap is requeued (which re-triggers reduction through the worker), so re-folding
+   * its patient every tick would be wasted O(history) work forever. We exclude those: for a blocked
+   * patient we keep it only if it still has an unfolded ready event at or before the snapshot cursor
+   * (a real crash orphan). A non-blocked patient is always a candidate (a new ready event extending
+   * the prefix, or a crash orphan). Blocked patients are rare, so the per-patient check is bounded.
+   */
   async findOrphanReadyPatients(): Promise<string[]> {
-    return this.col.distinct('patientId', {
+    const patients = (await this.col.distinct('patientId', {
       kind: 'event',
       status: 'ready',
       folded: false,
-    }) as Promise<string[]>;
+    })) as string[];
+    if (patients.length === 0) {
+      return [];
+    }
+    const blocked = (await this.col
+      .find({ kind: 'snapshot', patientId: { $in: patients }, blocked: true })
+      .project({ patientId: 1, appliedThrough: 1 })
+      .toArray()) as Array<{ patientId: string; appliedThrough: Cursor | null }>;
+    if (blocked.length === 0) {
+      return patients;
+    }
+    const cursorByPatient = new Map(blocked.map((s) => [s.patientId, s.appliedThrough]));
+
+    const kept: string[] = [];
+    for (const patientId of patients) {
+      if (!cursorByPatient.has(patientId)) {
+        kept.push(patientId); // not blocked: always a candidate
+        continue;
+      }
+      const cursor = cursorByPatient.get(patientId) ?? null;
+      if (cursor === null) {
+        continue; // blocked with no published prefix: every ready event is stranded after the gap
+      }
+      const inPrefixOrphan = await this.col.countDocuments({
+        kind: 'event',
+        patientId,
+        status: 'ready',
+        folded: false,
+        $or: [{ ts: { $lt: cursor.ts } }, { ts: cursor.ts, eventId: { $lte: cursor.eventId } }],
+      });
+      if (inPrefixOrphan > 0) {
+        kept.push(patientId);
+      }
+    }
+    return kept;
   }
 
   /**

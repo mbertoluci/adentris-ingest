@@ -34,7 +34,7 @@ export async function ensureIndexes(db: Db): Promise<void> {
     {
       key: { leaseUntil: 1 },
       name: 'processing_lease',
-      partialFilterExpression: { status: 'processing' },
+      partialFilterExpression: { kind: 'event', status: 'processing' },
     },
     // ordered refold per patient; NOT partial - the refold needs the whole history
     {

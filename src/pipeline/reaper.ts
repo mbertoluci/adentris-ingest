@@ -30,11 +30,12 @@ export class Reaper {
   async tick(): Promise<{ requeued: number; failed: number; reduced: number }> {
     const { requeued, failed } = await this.repo.requeueExpired(this.clock.now(), this.maxAttempts);
 
-    // Reduce patients left with a ready orphan (crash between stages, C5) and patients whose
+    // Reduce patients left with a genuine ready orphan (crash between stages, C5) and patients whose
     // snapshot still needs to be flipped blocked by a retroactive failed gap (C4). Both sets are
-    // bounded (the orphan set by in-flight work, the failed set by failed events and only while
-    // not yet blocked), so the tick never degrades into a full-history refold of every patient
-    // that has ever failed.
+    // bounded: the orphan set excludes a ready event stranded behind a failed gap (it cannot fold
+    // until the gap clears, which the worker trigger handles), and the failed set drops patients
+    // already blocked. So the tick never degrades into a full-history refold, tick after tick, of a
+    // patient permanently blocked or stranded.
     const patients = new Set([
       ...(await this.repo.findOrphanReadyPatients()),
       ...(await this.repo.findFailedPatientsNeedingBlock()),
