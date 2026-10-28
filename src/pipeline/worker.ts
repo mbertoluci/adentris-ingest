@@ -20,9 +20,11 @@ export interface ReductionTrigger {
 /**
  * Stage 1. Plain class (no Nest) so it is tested by direct instantiation with fakes. One turn:
  * claim a queued event under a fresh fence, run the external side-effect within a timeout, and
- * commit the result under that fence. A failed or timed-out call is abandoned - the lease
- * expires and the reaper requeues it (the attempts budget and failed status live in the reaper,
- * C14). The commit is fenced (C2): a zombie whose lease was reclaimed cannot overwrite.
+ * commit the result under that fence. A failed or timed-out external call counts one attempt and
+ * releases the lease here (recordExternalFailure, C14), so the reaper requeues it promptly - or
+ * parks it failed once the budget is spent. An infra failure on the COMMIT (not the work) burns
+ * no attempt: the event stays processing and the reaper requeues it unchanged. The commit is
+ * fenced (C2): a zombie whose lease was reclaimed cannot overwrite.
  */
 export class Worker {
   private readonly logger = new Logger(Worker.name);

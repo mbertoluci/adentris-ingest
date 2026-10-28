@@ -54,6 +54,11 @@ export class AppExceptionFilter implements ExceptionFilter {
   }
 
   private statusOf(exception: unknown): number | undefined {
+    // A thrown value is not guaranteed to be an object: guard before dereferencing, or a null/
+    // primitive exception turns this filter itself into a TypeError and masks the real 500.
+    if (typeof exception !== 'object' || exception === null) {
+      return undefined;
+    }
     const candidate = exception as { status?: unknown; statusCode?: unknown };
     if (typeof candidate.status === 'number') {
       return candidate.status;
