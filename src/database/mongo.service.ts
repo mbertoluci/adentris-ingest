@@ -5,10 +5,12 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Db, MongoClient } from 'mongodb';
+import { ensureIndexes } from '../records/ensure-indexes';
 
 /**
- * Owns the single MongoClient. Connects on init, so a bad connection fails the boot fast (C16),
- * and closes cleanly on SIGTERM. `j: true` so an acknowledged write is journaled - the basis for
+ * Owns the single MongoClient. On init it connects and ensures the indexes before anything
+ * serves traffic, so a bad connection or a missing index fails the boot fast (C10/C16).
+ * Closes cleanly on SIGTERM. `j: true` so an acknowledged write is journaled - the basis for
  * answering 202 only after the event is durable.
  */
 @Injectable()
@@ -24,6 +26,7 @@ export class MongoService implements OnModuleInit, OnApplicationShutdown {
     });
     await this.client.connect();
     this.database = this.client.db(this.config.getOrThrow<string>('MONGO_DB'));
+    await ensureIndexes(this.database);
   }
 
   get db(): Db {
