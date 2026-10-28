@@ -80,6 +80,49 @@ describe('POST /events (C6/C7/C12/C13)', () => {
     expect(again.body.status).toBe('failed'); // honest: does not claim a failed event is queued
   });
 
+  it('an Idempotency-Key dedups across a mutated body (occurrence identity)', async () => {
+    // same key, same patient, but the sender regenerated ts and nudged the data on retry: with a
+    // content hash these would be two events; the key makes them one (never counted twice).
+    const first = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'op-123')
+      .send(valid());
+    const retry = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'op-123')
+      .send({ ...valid(), ts: '2026-01-01T00:00:05.000Z', data: { heartRate: 81 } });
+
+    expect(retry.status).toBe(202);
+    expect(retry.body.eventId).toBe(first.body.eventId);
+    expect(await eventCount()).toBe(1);
+  });
+
+  it('distinct Idempotency-Keys keep identical bodies as separate events', async () => {
+    // two genuinely distinct observations that happen to carry the same payload: a content hash
+    // would collapse them (lost event); distinct keys keep them apart.
+    const a = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'op-A')
+      .send(valid());
+    const b = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'op-B')
+      .send(valid());
+
+    expect(a.body.eventId).not.toBe(b.body.eventId);
+    expect(await eventCount()).toBe(2);
+  });
+
+  it('rejects an over-long Idempotency-Key with 400, never stores it', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/events')
+      .set('Idempotency-Key', 'x'.repeat(201))
+      .send(valid());
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('validation_failed');
+    expect(await eventCount()).toBe(0);
+  });
+
   it('treats a patientId differing only by Unicode form as the same patient (NFC)', async () => {
     // "José" composed (NFC) vs "Jose" + combining acute (NFD): same identity after NFC, so the
     // dedup key and the stored/grouped patientId must agree - one event, stored in NFC form.

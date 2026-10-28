@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { CLOCK } from '../common/clock';
 import { InvalidInputError } from '../domain/errors';
-import { eventId } from '../domain/event-id';
+import { eventId, occurrenceId } from '../domain/event-id';
 import { Clock } from '../domain/ports';
 import { EventDoc, EventStatus } from '../records/record.types';
 import { RecordsRepository } from '../records/records.repository';
@@ -22,10 +22,14 @@ export class IngestService {
 
   /**
    * Validate, derive the dedup id, and persist. The order is DTO -> plain-object + ts bounds ->
-   * canonicalJSON/C13 (inside eventId) -> persist. The 202 is only returned once the write is
+   * canonicalJSON/C13 (inside the id) -> persist. The 202 is only returned once the write is
    * durable; a duplicate returns the real persisted status (C6/C7).
+   *
+   * Identity: when the sender supplies an Idempotency-Key the id is derived from it (occurrence
+   * identity, the sender declares which deliveries are the same event); otherwise it falls back to
+   * the content hash. The key is optional and the body contract is unchanged, so this is additive.
    */
-  async ingest(dto: IngestEventDto): Promise<IngestResult> {
+  async ingest(dto: IngestEventDto, idempotencyKey?: string): Promise<IngestResult> {
     const { data } = dto;
     if (data === null || typeof data !== 'object' || Array.isArray(data)) {
       throw new InvalidInputError('data must be a plain object');
@@ -39,7 +43,7 @@ export class IngestService {
     // disagree for a patientId sent in a different Unicode form.
     const patientId = dto.patientId.normalize('NFC');
     const type = dto.type.normalize('NFC');
-    const id = eventId({ patientId, type, ts, data });
+    const id = this.identify(patientId, type, ts, data, idempotencyKey);
 
     const doc: EventDoc = {
       kind: 'event',
@@ -56,5 +60,22 @@ export class IngestService {
 
     const outcome = await this.repo.insertEvent(doc);
     return { eventId: id, status: outcome.status };
+  }
+
+  private identify(
+    patientId: string,
+    type: string,
+    ts: Date,
+    data: Record<string, unknown>,
+    idempotencyKey?: string,
+  ): string {
+    if (idempotencyKey === undefined) {
+      return eventId({ patientId, type, ts, data });
+    }
+    const key = idempotencyKey.trim();
+    if (key.length === 0 || key.length > 200) {
+      throw new InvalidInputError('Idempotency-Key must be 1-200 characters');
+    }
+    return occurrenceId(patientId, key);
   }
 }
