@@ -93,6 +93,11 @@ An optional `Idempotency-Key` request header sets the event's identity: when pre
 with the same key (same patient) are the same event even if the body or `ts` drift on a retry, and
 two distinct observations that happen to share a body stay separate. Without it, the identity is the
 content hash (see Known limitations). The body contract is unchanged, so the header is purely additive.
+The key is occurrence identity, so the body is not part of it: if a sender reuses one key for two
+genuinely different events, the first body wins and the second is dropped as a duplicate (the 202
+carries the first event's status, with no conflict signal - the same reasoning as the deliberate lack
+of a 409). Key uniqueness per occurrence is the sender's responsibility; the content-hash walk (C13)
+still runs on `data` in both paths, so a key never bypasses input validation.
 
 | Status | `code` | When | Sender should |
 |--------|--------|------|---------------|
@@ -162,9 +167,14 @@ one reads) would cost more on the heaviest criterion than a documented cut.
   common, not just crash-triggered. A shared clock source or a monotonic fence bound would tighten it.
 - **Per-patient fold is O(history)**, recomputed under an optimistic version CAS (not an exclusive
   lock): the one scaling limit, addressed by an incremental fold next (the pure fold is designed to
-  be swapped). The recovery sweep no longer *re-triggers* that refold for an already-blocked patient
-  (bounded by the failed-event index), so the O(history) cost is paid on real state change, not every
-  tick. See the design notes.
+  be swapped). A hot patient with a long history pays that O(history) on each real advance - that
+  cost is not removed. What the recovery sweeps avoid is paying it *for nothing*: a permanently
+  blocked patient and a ready event stranded behind a failed gap are both excluded from the per-tick
+  sweep, so the reaper never re-folds a patient whose state cannot change. See the design notes.
+- **`blocked` can be briefly stale.** It flips only on a reducer run, so in the window between a
+  failed gap being requeued (manual unlock) and the requeued event being processed, the snapshot may
+  still read `blocked` though the current gap is no longer a failed event. It self-heals on the next
+  commit; a consumer treating `blocked` as "stuck" sees a conservative, not a false-negative, signal.
 - **Single-node Mongo, atomicity per document** (no multi-document transaction, by design): the
   single document is the unit of work; consistency comes from idempotency + write order + reaper.
 

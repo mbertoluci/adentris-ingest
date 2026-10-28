@@ -70,6 +70,19 @@ the real 5s duration: ~100/5 = 20 events/s ~ 1200/min. (The committing worker al
 reduction, so its real occupancy is slightly over 5s - a reason the headroom matters.) Growth past
 that is more workers and more instances, until the refold below becomes the limit.
 
+## The independence premise (and where it breaks)
+
+The two-stage split assumes the per-event external `effect` is a function of the event alone, not of
+the patient's prior state. That is what lets stage 1 run fully parallel (any worker, any order) and
+stage 2 be a pure replay. If the real external call were instead state-dependent - its result for
+event N depends on the folded state through N-1 - the model degrades sharply: events for one patient
+would have to be processed strictly in order, one at a time, so a single patient's throughput would
+collapse to ~1 event per external call (~12/min at 5s), and the fold would no longer be a cheap
+replay of precomputed effects. The design would then need a per-patient serial lane (the claim keyed
+by patient, not global FIFO) and stage 2 folded inline. The simulated external here is
+state-independent by construction, so the premise holds for this exercise; it is the first thing to
+confirm against the real integration before trusting the parallelism.
+
 ## Scalability path
 
 Running N instances is safe as-is - claim, fence, and reaper are concurrency-safe, so more
@@ -82,11 +95,14 @@ bottleneck, and it grows with time, independent of hardware. The defence already
 fold plus an ordered replay designed so the reducer can be swapped; the next step is an incremental
 fold that applies only the new tail (a late event behind the cursor still needs a bounded recompute
 from a checkpoint). The recovery sweep itself is bounded: failed-patient discovery runs on a partial
-index (cardinality = failed events, not history), and a patient whose snapshot is already blocked is
-dropped from the sweep, so the reaper never re-pays an O(history) refold tick after tick for a
-permanently blocked patient. The gauge aggregate (`countsByStatus`) runs on its own loop, off the
-reaper's recovery path, so it can never delay lease recovery. Storage tiering (archiving folded
-history, which would also bound that aggregate) is a later concern.
+index (cardinality = failed events, not history), a patient whose snapshot is already blocked is
+dropped from the failed sweep, and the orphan sweep drops a ready event stranded strictly behind a
+failed gap (it cannot fold until the gap clears, which the worker trigger handles) - so the reaper
+never re-pays an O(history) refold tick after tick for a patient whose state cannot change. The one
+cost that is still history-shaped is the gauge aggregate (`countsByStatus`, a `$group` over all
+events): it runs on its own loop, off the reaper's recovery *await* path, so a slow gauge cannot
+stall lease reclaim, but it does share the one Mongo. Bounding it (a maintained counter, or storage
+tiering that archives folded history) is a later concern, and `/stats` is explicitly a cut.
 
 ## Where the detail lives
 
