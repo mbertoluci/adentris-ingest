@@ -145,7 +145,7 @@ export class RecordsRepository {
       };
       if (event.attempts >= maxAttempts) {
         const res = await this.col.updateOne(predicate, {
-          $set: { status: 'failed', lastError: 'max attempts exceeded' },
+          $set: { status: 'failed' },
           $unset: { fence: '', leaseUntil: '' },
         });
         failed += res.modifiedCount;
@@ -172,10 +172,21 @@ export class RecordsRepository {
     return counts;
   }
 
-  /** receivedAt of the oldest unresolved (queued or processing) event, or null if none. */
-  async oldestUnresolvedReceivedAt(): Promise<Date | null> {
+  /**
+   * receivedAt of the oldest UNSETTLED event, or null if none. Unsettled is not just queued or
+   * processing: a `ready` event that is not yet `folded` is accepted work that has not reached the
+   * snapshot (a stalled or crashed reducer, the orphan of C5), so it must count toward the backlog
+   * age. Excluding it would let a stuck second stage report a healthy gauge while work piles up.
+   */
+  async oldestUnsettledReceivedAt(): Promise<Date | null> {
     const doc = await this.col
-      .find({ kind: 'event', status: { $in: ['queued', 'processing'] } })
+      .find({
+        kind: 'event',
+        $or: [
+          { status: { $in: ['queued', 'processing'] } },
+          { status: 'ready', folded: false },
+        ],
+      })
       .sort({ receivedAt: 1 })
       .limit(1)
       .next();
@@ -192,16 +203,28 @@ export class RecordsRepository {
   }
 
   /**
-   * Reaper sweep (c): patients with a failed event. The reducer sets a snapshot `blocked` only
-   * when the gap is a failed event (C4); a failed event raises no ready orphan, so without this
-   * sweep a retroactive failed gap would never flip blocked. The reduce is idempotent, so
-   * re-feeding an already-correct patient is a cheap no-op.
+   * Reaper sweep (c): patients whose snapshot still needs to be flipped `blocked`. A failed event
+   * raises no ready orphan, so without this sweep a retroactive failed gap (C4) would never block.
+   * But re-reducing a patient is an O(history) refold, so we must not do it every tick forever: a
+   * patient whose snapshot is ALREADY blocked is in its stable state and is dropped from the sweep
+   * (it re-enters only when a new ready event arrives, which the worker's own trigger and the
+   * orphan sweep already handle). The failed set is indexed (failed_patients) and bounded by the
+   * number of failed events, not the history. Two bounded reads instead of a per-tick full refold.
    */
-  async findPatientsWithFailed(): Promise<string[]> {
-    return this.col.distinct('patientId', {
+  async findFailedPatientsNeedingBlock(): Promise<string[]> {
+    const failed = (await this.col.distinct('patientId', {
       kind: 'event',
       status: 'failed',
-    }) as Promise<string[]>;
+    })) as string[];
+    if (failed.length === 0) {
+      return [];
+    }
+    const alreadyBlocked = (await this.col
+      .find({ kind: 'snapshot', patientId: { $in: failed }, blocked: true })
+      .project({ patientId: 1 })
+      .toArray()) as Array<{ patientId: string }>;
+    const blocked = new Set(alreadyBlocked.map((s) => s.patientId));
+    return failed.filter((patientId) => !blocked.has(patientId));
   }
 
   /** Mark the folded prefix (ready events only) as folded; idempotent, clears the orphan (C5). */

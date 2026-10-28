@@ -113,7 +113,7 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
     expect(result.failed).toBe(1);
     const doc = await find('e1');
     expect(doc?.status).toBe('failed');
-    expect(doc?.lastError).toBeDefined();
+    expect(doc?.attempts).toBe(MAX_ATTEMPTS);
   });
 
   it('leaves a still-valid lease untouched', async () => {
@@ -203,7 +203,6 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
       status: 'failed',
       folded: false,
       attempts: MAX_ATTEMPTS,
-      lastError: 'max attempts exceeded',
     });
 
     // the reaper reconciles blocked without any manual reducer call
@@ -213,6 +212,40 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
     const snap = await snapshot('p1');
     expect(snap?.blocked).toBe(true);
     expect(snap?.appliedThrough?.eventId).toBe('b'); // state preserved, not regressed
+  });
+
+  it('does not refold a patient whose snapshot is already blocked (bounded sweep)', async () => {
+    const clock = new MutableClock(at(100));
+    // a failed event with an already-blocked snapshot: the stable state, nothing left to do
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event',
+      eventId: 'a',
+      patientId: 'p1',
+      type: 't',
+      data: {},
+      ts: at(5),
+      receivedAt: at(5),
+      status: 'failed',
+      folded: false,
+      attempts: MAX_ATTEMPTS,
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'snapshot',
+      patientId: 'p1',
+      version: 1,
+      state: { appliedCount: 0, lastType: null, values: {} },
+      appliedThrough: null,
+      blocked: true,
+    });
+
+    // a recording trigger proves the already-blocked patient is dropped from the sweep: no O(history)
+    // refold is paid tick after tick for a permanently blocked patient.
+    const reduction = new RecordingReduction();
+    const reaper = new Reaper(repo, clock, reduction, MAX_ATTEMPTS);
+    const result = await reaper.tick();
+
+    expect(reduction.calls).toEqual([]); // not re-reduced
+    expect(result.reduced).toBe(0);
   });
 
   it('a throwing reduction for one patient does not abort the tick (C15)', async () => {

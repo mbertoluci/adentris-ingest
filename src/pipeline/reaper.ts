@@ -7,7 +7,7 @@ import { ReductionTrigger } from './worker';
 export interface ReaperRepo {
   requeueExpired(now: Date, maxAttempts: number): Promise<{ requeued: number; failed: number }>;
   findOrphanReadyPatients(): Promise<string[]>;
-  findPatientsWithFailed(): Promise<string[]>;
+  findFailedPatientsNeedingBlock(): Promise<string[]>;
 }
 
 /**
@@ -30,12 +30,14 @@ export class Reaper {
   async tick(): Promise<{ requeued: number; failed: number; reduced: number }> {
     const { requeued, failed } = await this.repo.requeueExpired(this.clock.now(), this.maxAttempts);
 
-    // Reduce patients left with a ready orphan (crash between stages, C5) and patients with a
-    // failed event (so a retroactive failed gap flips the snapshot blocked, C4). The reduce is
-    // idempotent, so a patient already in the right state is a cheap no-op.
+    // Reduce patients left with a ready orphan (crash between stages, C5) and patients whose
+    // snapshot still needs to be flipped blocked by a retroactive failed gap (C4). Both sets are
+    // bounded (the orphan set by in-flight work, the failed set by failed events and only while
+    // not yet blocked), so the tick never degrades into a full-history refold of every patient
+    // that has ever failed.
     const patients = new Set([
       ...(await this.repo.findOrphanReadyPatients()),
-      ...(await this.repo.findPatientsWithFailed()),
+      ...(await this.repo.findFailedPatientsNeedingBlock()),
     ]);
     let reduced = 0;
     for (const patientId of patients) {

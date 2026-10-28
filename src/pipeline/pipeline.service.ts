@@ -39,6 +39,7 @@ export class PipelineService implements OnApplicationShutdown {
     this.loops = [
       ...Array.from({ length: this.concurrency }, () => this.workerLoop()),
       this.reaperLoop(),
+      this.statsLoop(),
     ];
     this.logger.log(`pipeline started (concurrency=${this.concurrency})`);
   }
@@ -60,13 +61,22 @@ export class PipelineService implements OnApplicationShutdown {
   private async reaperLoop(): Promise<void> {
     while (this.running) {
       // a dead reaper is the worst failure mode (leases never expire): contain, never crash.
-      // Keep the stats refresh in its own catch so a gauge error is not misreported as a reaper
-      // failure.
       try {
         await this.reaper.tick();
       } catch (error) {
         this.logger.error(`reaper tick failed: ${errorText(error)}`);
       }
+      await delay(this.reaperMs);
+    }
+  }
+
+  /**
+   * The gauge runs on its own loop, NOT on the reaper's: the counts query is an aggregate over the
+   * event history, and lease recovery (the reaper) must never wait behind it. A slow or failing
+   * stats refresh is contained here and leaves recovery untouched.
+   */
+  private async statsLoop(): Promise<void> {
+    while (this.running) {
       try {
         await this.stats.refresh();
       } catch (error) {

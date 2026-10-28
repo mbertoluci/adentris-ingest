@@ -13,9 +13,10 @@ export interface StatsGauge {
 
 /**
  * The few numbers that show the pipeline is draining: counts per status, the age of the oldest
- * unresolved event (the backlog signal), and when the process started (plus when the gauge was
- * last refreshed). Held in memory and refreshed on the reaper cadence; the handler just reads it,
- * so /stats never runs an aggregation on the request path.
+ * UNSETTLED event (queued, processing, or ready-but-not-yet-folded - so a stalled second stage
+ * cannot hide behind a healthy-looking gauge), and when the process started (plus when the gauge
+ * was last refreshed). Held in memory and refreshed on its own background loop; the handler just
+ * reads it, so /stats never runs an aggregation on the request path.
  */
 @Injectable()
 export class StatsService {
@@ -37,7 +38,7 @@ export class StatsService {
 
   async refresh(): Promise<void> {
     const counts = await this.repo.countsByStatus();
-    const oldest = await this.repo.oldestUnresolvedReceivedAt();
+    const oldest = await this.repo.oldestUnsettledReceivedAt();
     const now = this.clock.now();
     this.gauge = {
       startedAt: this.startedAt.toISOString(),

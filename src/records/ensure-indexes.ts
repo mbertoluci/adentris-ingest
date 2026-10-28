@@ -47,5 +47,11 @@ export async function ensureIndexes(db: Db): Promise<void> {
       name: 'ready_orphan',
       partialFilterExpression: { kind: 'event', status: 'ready', folded: false },
     },
+    // failed-event discovery for the blocked sweep; cardinality = failed events, not history
+    {
+      key: { patientId: 1 },
+      name: 'failed_patients',
+      partialFilterExpression: { kind: 'event', status: 'failed' },
+    },
   ]);
 }

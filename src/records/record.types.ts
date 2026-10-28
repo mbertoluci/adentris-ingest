@@ -24,7 +24,6 @@ export interface EventDoc {
   leaseUntil?: Date;
   fence?: string;
   effect?: Record<string, unknown>;
-  lastError?: string;
 }
 
 /** One per patient. `state` is the fold of the contiguous ready prefix. */
