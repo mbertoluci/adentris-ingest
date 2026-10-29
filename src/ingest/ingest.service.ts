@@ -1,5 +1,4 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { canonicalJSON } from '../domain/canonical';
 import { CLOCK } from '../common/clock';
 import { InvalidInputError } from '../domain/errors';
 import { eventId, occurrenceId } from '../domain/event-id';
@@ -35,11 +34,6 @@ export class IngestService {
     if (data === null || typeof data !== 'object' || Array.isArray(data)) {
       throw new InvalidInputError('data must be a plain object');
     }
-    // C13 must hold no matter how identity is derived. The content-hash path walks `data` inside
-    // eventId, but the occurrence-id path (Idempotency-Key) hashes only the key, so without this
-    // the hostile-input guard (depth/node caps, $/dotted/prototype keys, non-finite) would be
-    // bypassed by simply sending a key. Validate the payload here, independently of the id strategy.
-    canonicalJSON(data);
 
     const now = this.clock.now();
     const ts = parseEventTs(dto.ts, now);
@@ -49,7 +43,14 @@ export class IngestService {
     // disagree for a patientId sent in a different Unicode form.
     const patientId = dto.patientId.normalize('NFC');
     const type = dto.type.normalize('NFC');
-    const id = this.identify(patientId, type, ts, data, idempotencyKey);
+
+    // Always derive the content hash over the FULL envelope. This runs the canonicalJSON hostile-
+    // input walk (C13) with the same depth/node budget no matter the identity strategy, so sending
+    // an Idempotency-Key can never widen what `data` is allowed to contain (validating only
+    // canonicalJSON(data) would use a slightly larger budget than the envelope walk). When a key is
+    // present we use the occurrence id for identity; the envelope is validated either way.
+    const contentId = eventId({ patientId, type, ts, data });
+    const id = this.identify(contentId, patientId, idempotencyKey);
 
     const doc: EventDoc = {
       kind: 'event',
@@ -68,15 +69,9 @@ export class IngestService {
     return { eventId: id, status: outcome.status };
   }
 
-  private identify(
-    patientId: string,
-    type: string,
-    ts: Date,
-    data: Record<string, unknown>,
-    idempotencyKey?: string,
-  ): string {
+  private identify(contentId: string, patientId: string, idempotencyKey?: string): string {
     if (idempotencyKey === undefined) {
-      return eventId({ patientId, type, ts, data });
+      return contentId;
     }
     const key = idempotencyKey.trim();
     if (key.length === 0 || key.length > 200) {
