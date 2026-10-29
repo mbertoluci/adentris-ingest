@@ -230,18 +230,40 @@ export class RecordsRepository {
         continue;
       }
       const cursor = cursorByPatient.get(patientId) ?? null;
-      if (cursor === null) {
-        continue; // blocked with no published prefix: every ready event is stranded after the gap
+
+      // The `blocked` flag can be stale: if the gap was cleared (e.g. a manual unlock requeued the
+      // failed event and it committed ready, then the process died before reduction), the first
+      // event after the cursor is now ready and the prefix can EXTEND. We must re-fold in that case,
+      // or that clinical event is stranded forever with no new traffic. So keep the patient when the
+      // next event past the cursor is ready, regardless of what `blocked` still says.
+      const afterCursor =
+        cursor === null
+          ? {}
+          : { $or: [{ ts: { $gt: cursor.ts } }, { ts: cursor.ts, eventId: { $gt: cursor.eventId } }] };
+      const next = (await this.col
+        .find({ kind: 'event', patientId, ...afterCursor })
+        .sort({ ts: 1, eventId: 1 })
+        .limit(1)
+        .next()) as EventDoc | null;
+      if (next?.status === 'ready') {
+        kept.push(patientId); // the prefix can extend; a stale block will be cleared by the refold
+        continue;
       }
-      const inPrefixOrphan = await this.col.countDocuments({
-        kind: 'event',
-        patientId,
-        status: 'ready',
-        folded: false,
-        $or: [{ ts: { $lt: cursor.ts } }, { ts: cursor.ts, eventId: { $lte: cursor.eventId } }],
-      });
-      if (inPrefixOrphan > 0) {
-        kept.push(patientId);
+
+      // The head past the cursor is still a non-ready gap, so ready events beyond it are genuinely
+      // stranded. Only a crash orphan WITHIN the published prefix (ready & unfolded at or before the
+      // cursor) still needs reconciling.
+      if (cursor !== null) {
+        const inPrefixOrphan = await this.col.countDocuments({
+          kind: 'event',
+          patientId,
+          status: 'ready',
+          folded: false,
+          $or: [{ ts: { $lt: cursor.ts } }, { ts: cursor.ts, eventId: { $lte: cursor.eventId } }],
+        });
+        if (inPrefixOrphan > 0) {
+          kept.push(patientId);
+        }
       }
     }
     return kept;

@@ -299,6 +299,31 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
     expect(result.reduced).toBe(1);
   });
 
+  it('recovers a blocked patient once its gap clears: a ready head is folded and unblocks (C7)', async () => {
+    const clock = new MutableClock(at(100));
+    // the patient's first event was failed (blocked, appliedThrough:null). It was manually unlocked,
+    // a worker committed it ready, and the process died before reduction. The snapshot still reads
+    // blocked. The reaper MUST fold it now - otherwise this clinical event is stranded forever with
+    // no new traffic. The stale `blocked` flag must not stop recovery.
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'a', patientId: 'p1', type: 't', data: {},
+      ts: at(5), receivedAt: at(5), status: 'ready', folded: false, attempts: MAX_ATTEMPTS,
+      effect: { v: 'a' },
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'snapshot', patientId: 'p1', version: 1,
+      state: { appliedCount: 0, lastType: null, values: {} }, appliedThrough: null, blocked: true,
+    });
+
+    const result = await new Reaper(repo, clock, new Reducer(repo), MAX_ATTEMPTS).tick();
+
+    expect(result.reduced).toBe(1);
+    const snap = await snapshot('p1');
+    expect(snap?.blocked).toBe(false); // stale block cleared
+    expect(snap?.appliedThrough?.eventId).toBe('a'); // the stranded event is now in the snapshot
+    expect(snap?.state.appliedCount).toBe(1);
+  });
+
   it('a throwing reduction for one patient does not abort the tick (C15)', async () => {
     for (const [eventId, patientId] of [
       ['e1', 'pA'],
