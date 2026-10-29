@@ -96,9 +96,11 @@ fold plus an ordered replay designed so the reducer can be swapped; the next ste
 fold that applies only the new tail (a late event behind the cursor still needs a bounded recompute
 from a checkpoint). The recovery sweep itself is bounded: failed-patient discovery runs on a partial
 index (cardinality = failed events, not history), a patient whose snapshot is already blocked is
-dropped from the failed sweep, and the orphan sweep drops a ready event stranded strictly behind a
-failed gap (it cannot fold until the gap clears, which the worker trigger handles) - so the reaper
-never re-pays an O(history) refold tick after tick for a patient whose state cannot change. The one
+dropped from the failed sweep, and the orphan sweep re-folds a blocked patient only when the refold
+is productive - the ready prefix can extend past the cursor, or a crash orphan sits within the
+published prefix. A ready event stranded behind an unresolved gap (before or after the cursor) is
+left until the gap clears, so the reaper never re-pays an O(history) refold tick after tick for a
+patient whose state cannot change. The one
 cost that is still history-shaped is the gauge aggregate (`countsByStatus`, a `$group` over all
 events): it runs on its own loop, off the reaper's recovery *await* path, so a slow gauge cannot
 stall lease reclaim, but it does share the one Mongo. Bounding it (a maintained counter, or storage

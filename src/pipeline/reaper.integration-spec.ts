@@ -324,6 +324,38 @@ describe('Reaper (F5 recovery, C5, C14)', () => {
     expect(snap?.state.appliedCount).toBe(1);
   });
 
+  it('does not refold when a ready event sits past the cursor but a failed gap is BEHIND it', async () => {
+    const clock = new MutableClock(at(100));
+    // b (t=10) published and folded; a late a (t=5) then fails -> snapshot stays at b, blocked. Then
+    // d (t=15) commits ready. d is after the cursor, but planReduction folds from the start and stops
+    // at the failed a, so the prefix cannot advance - re-folding would just re-confirm blocked every
+    // tick (wasted O(history)). The sweep must NOT pick this patient up. (d stays in the collection,
+    // just unapplied, until a clears.)
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'b', patientId: 'p1', type: 't', data: {},
+      ts: at(10), receivedAt: at(10), status: 'ready', folded: true, attempts: 0, effect: { v: 'b' },
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'a', patientId: 'p1', type: 't', data: {},
+      ts: at(5), receivedAt: at(5), status: 'failed', folded: false, attempts: MAX_ATTEMPTS,
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'event', eventId: 'd', patientId: 'p1', type: 't', data: {},
+      ts: at(15), receivedAt: at(15), status: 'ready', folded: false, attempts: 0, effect: { v: 'd' },
+    });
+    await db.collection(RECORDS_COLLECTION).insertOne({
+      kind: 'snapshot', patientId: 'p1', version: 1,
+      state: { appliedCount: 1, lastType: 't', values: { v: 'b' } },
+      appliedThrough: { ts: at(10), eventId: 'b' }, blocked: true,
+    });
+
+    const reduction = new RecordingReduction();
+    const result = await new Reaper(repo, clock, reduction, MAX_ATTEMPTS).tick();
+
+    expect(reduction.calls).toEqual([]); // not productive: failed gap behind the cursor collapses the fold
+    expect(result.reduced).toBe(0);
+  });
+
   it('a throwing reduction for one patient does not abort the tick (C15)', async () => {
     for (const [eventId, patientId] of [
       ['e1', 'pA'],

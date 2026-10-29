@@ -195,15 +195,23 @@ export class RecordsRepository {
   }
 
   /**
-   * Reaper sweep (b): patients with a genuine ready orphan - a ready event not yet folded that sits
-   * WITHIN the already-published prefix (the C5 crash between the snapshot write and markFolded).
+   * Reaper sweep (b): patients for whom a reduction would actually do something. A non-blocked
+   * patient with a `ready & folded:false` event is always a candidate. A blocked patient is kept
+   * only when a refold is PRODUCTIVE, because `planReduction` always folds from the start of the
+   * history: a failed event anywhere before the first ready event (even one BEHIND the published
+   * cursor - a retroactive late gap) collapses the prefix, so "a ready event exists past the cursor"
+   * is not enough - re-folding would just re-confirm `blocked` every tick (wasted O(history)).
    *
-   * A ready event stranded strictly AFTER a failed gap is also `ready & folded:false`, but it cannot
-   * fold until the gap is requeued (which re-triggers reduction through the worker), so re-folding
-   * its patient every tick would be wasted O(history) work forever. We exclude those: for a blocked
-   * patient we keep it only if it still has an unfolded ready event at or before the snapshot cursor
-   * (a real crash orphan). A non-blocked patient is always a candidate (a new ready event extending
-   * the prefix, or a crash orphan). Blocked patients are rare, so the per-patient check is bounded.
+   * So for a blocked patient we find the first non-ready event (the gap, min `(ts, eventId)`) and
+   * keep the patient only if either:
+   *   (a) the contiguous ready prefix can EXTEND past the cursor - a `ready & folded:false` event
+   *       sits strictly between the cursor and the gap (every event before the gap is ready); or
+   *   (b) a crash orphan sits WITHIN the published prefix - a `ready & folded:false` event at or
+   *       before the cursor (snapshot written, markFolded not reached, the C5 case).
+   * A ready event stranded behind an unresolved gap (before or after the cursor) is neither, so it
+   * is left alone until the gap clears (the worker trigger re-folds then). Blocked patients are rare
+   * and the gap is found by an indexed scan that stops at the first non-ready event, so this stays
+   * bounded and never pays a full `findEventsByPatient` for a patient whose state cannot change.
    */
   async findOrphanReadyPatients(): Promise<string[]> {
     const patients = (await this.col.distinct('patientId', {
@@ -231,28 +239,38 @@ export class RecordsRepository {
       }
       const cursor = cursorByPatient.get(patientId) ?? null;
 
-      // The `blocked` flag can be stale: if the gap was cleared (e.g. a manual unlock requeued the
-      // failed event and it committed ready, then the process died before reduction), the first
-      // event after the cursor is now ready and the prefix can EXTEND. We must re-fold in that case,
-      // or that clinical event is stranded forever with no new traffic. So keep the patient when the
-      // next event past the cursor is ready, regardless of what `blocked` still says.
-      const afterCursor =
-        cursor === null
-          ? {}
-          : { $or: [{ ts: { $gt: cursor.ts } }, { ts: cursor.ts, eventId: { $gt: cursor.eventId } }] };
-      const next = (await this.col
-        .find({ kind: 'event', patientId, ...afterCursor })
+      // the first non-ready event in the whole history is where planReduction stops (the gap)
+      const gap = (await this.col
+        .find({ kind: 'event', patientId, status: { $in: ['queued', 'processing', 'failed'] } })
         .sort({ ts: 1, eventId: 1 })
         .limit(1)
         .next()) as EventDoc | null;
-      if (next?.status === 'ready') {
-        kept.push(patientId); // the prefix can extend; a stale block will be cleared by the refold
+
+      // (a) a ready, unfolded event strictly between the cursor and the gap => the prefix extends
+      const between: Record<string, unknown>[] = [];
+      if (cursor !== null) {
+        between.push({
+          $or: [{ ts: { $gt: cursor.ts } }, { ts: cursor.ts, eventId: { $gt: cursor.eventId } }],
+        });
+      }
+      if (gap !== null) {
+        between.push({
+          $or: [{ ts: { $lt: gap.ts } }, { ts: gap.ts, eventId: { $lt: gap.eventId } }],
+        });
+      }
+      const canExtend = await this.col.countDocuments({
+        kind: 'event',
+        patientId,
+        status: 'ready',
+        folded: false,
+        ...(between.length ? { $and: between } : {}),
+      });
+      if (canExtend > 0) {
+        kept.push(patientId);
         continue;
       }
 
-      // The head past the cursor is still a non-ready gap, so ready events beyond it are genuinely
-      // stranded. Only a crash orphan WITHIN the published prefix (ready & unfolded at or before the
-      // cursor) still needs reconciling.
+      // (b) a crash orphan within the already-published prefix (ready & unfolded at or before cursor)
       if (cursor !== null) {
         const inPrefixOrphan = await this.col.countDocuments({
           kind: 'event',

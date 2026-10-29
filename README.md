@@ -168,9 +168,11 @@ one reads) would cost more on the heaviest criterion than a documented cut.
 - **Per-patient fold is O(history)**, recomputed under an optimistic version CAS (not an exclusive
   lock): the one scaling limit, addressed by an incremental fold next (the pure fold is designed to
   be swapped). A hot patient with a long history pays that O(history) on each real advance - that
-  cost is not removed. What the recovery sweeps avoid is paying it *for nothing*: a permanently
-  blocked patient and a ready event stranded behind a failed gap are both excluded from the per-tick
-  sweep, so the reaper never re-folds a patient whose state cannot change. See the design notes.
+  cost is not removed. What the recovery sweeps avoid is paying it *for nothing*: a blocked patient
+  is re-folded only when the refold is productive (the ready prefix can extend, or a crash orphan
+  sits within the published prefix). A ready event stranded behind an unresolved gap - whether the
+  gap is before or after the published cursor - is not re-folded until the gap clears, so the reaper
+  never re-folds a patient whose state cannot change. See the design notes.
 - **`blocked` can be briefly stale.** It flips only on a reducer run, so in the window between a
   failed gap being requeued (manual unlock) and the requeued event being processed, the snapshot may
   still read `blocked` though the current gap is no longer a failed event. It self-heals on the next
