@@ -5,7 +5,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Db, MongoClient } from 'mongodb';
-import { ensureIndexes } from '../records/ensure-indexes';
+import { ensureIndexes } from '../common/records/ensure-indexes';
 
 /**
  * Owns the single MongoClient. On init it connects and ensures the indexes before anything

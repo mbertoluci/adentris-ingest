@@ -1,9 +1,9 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
-import { AppModule } from './app.module';
-import { configureApp } from './app-setup';
-import { PipelineService } from './pipeline/pipeline.service';
+import { configureApp } from './app/app-setup';
+import { AppModule } from './app/app.module';
+import { PipelineService } from './features/pipeline/pipeline.service';
 
 async function bootstrap(): Promise<void> {
   // bodyParser disabled so configureApp registers the only parser (JSON-only, one limit). Mongo

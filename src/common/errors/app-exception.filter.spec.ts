@@ -1,6 +1,6 @@
 import { ArgumentsHost, HttpException } from '@nestjs/common';
-import { InvalidInputError } from '../../domain/errors';
 import { AppExceptionFilter } from './app-exception.filter';
+import { InvalidInputError } from './invalid-input.error';
 
 interface CapturedResponse {
   statusCode: number;

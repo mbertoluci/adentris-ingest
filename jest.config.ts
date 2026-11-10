@@ -13,8 +13,8 @@ const config: Config = {
     {
       displayName: 'unit',
       rootDir: '.',
-      // pure, Mongo-free specs: the domain plus boundary helpers (e.g. the HTTP exception filter)
-      testMatch: ['<rootDir>/src/domain/**/*.spec.ts', '<rootDir>/src/common/**/*.spec.ts'],
+      // pure, Mongo-free specs, colocated with the feature they cover (hashing, fold, HTTP filter)
+      testMatch: ['<rootDir>/src/**/*.spec.ts'],
       transform: tsTransform,
       moduleFileExtensions: ['ts', 'js', 'json'],
     },

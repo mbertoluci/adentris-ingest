@@ -6,8 +6,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Response } from 'express';
-import { InvalidInputError } from '../../domain/errors';
 import { AppException, ErrorCode } from './app-exception';
+import { InvalidInputError } from './invalid-input.error';
 
 const STATUS_CODE: Record<number, ErrorCode> = {
   400: 'validation_failed',

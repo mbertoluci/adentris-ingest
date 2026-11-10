@@ -37,9 +37,12 @@ risks were tackled.
 
 A single NestJS app (no Nx: no frontend, UI is not evaluated). It reuses a clean
 controller -> service -> repository layering, minus a unit-of-work/transaction manager -
-atomicity here is per document, not transactional. The pure domain is isolated by an import
-rule, not a package: `src/domain` imports neither Nest nor the driver, so its tests need no
-container. The repository exposes named atomic commands (claimNext, commitReady,
+atomicity here is per document, not transactional. Folders follow features
+(`src/features/{ingest,pipeline,stats}`, one Nest module each), cross-cutting code lives in
+`common`, `config` and `database`, and each feature keeps its pure logic beside the code that
+uses it. That logic is isolated by an import rule, not a package: the pure files
+(canonical hashing, the fold, `planReduction`) import neither Nest nor the driver, so their
+tests need no container. The repository exposes named atomic commands (claimNext, commitReady,
 saveSnapshot, requeueExpired, ...) rather than a generic `update(filter, patch)`, so Mongo
 semantics never leak up and the method names read as the guard list.
 
@@ -48,7 +51,7 @@ semantics never leak up and the method names read as the guard list.
 - **Clock and ExternalProcessor are the only seams.** All business time comes from
   `Clock.now()` (no `Date.now()` outside it), so tests advance time without fake timers; the
   external call is a port, so a fake can gate, fail, or time out on command.
-- **Unit tests** cover the pure domain (canonical hashing, the fold, `planReduction`) with
+- **Unit tests** cover the pure logic (canonical hashing, the fold, `planReduction`) with
   no Mongo; they run sub-second.
 - **Integration tests** run against a real in-memory Mongo (E11000, partial indexes, atomic
   `findOneAndUpdate` are real, never mocked). The background workers are tested as plain

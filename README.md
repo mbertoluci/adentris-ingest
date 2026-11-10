@@ -29,10 +29,32 @@ POST /events ──► validate + dedup ──► persist (queued) ──► 202
 - **Reaper** requeues work whose lease expired and reprocesses events orphaned by a crash. It is a
   component, not a cron: it is how crash recovery happens.
 
-`src/domain` is pure (fold, canonical hashing, input guards, the Clock/ExternalProcessor ports) and
-imports neither Nest nor the driver. `src/records` is the one repository whose method names recite
-the atomic protocol. `src/pipeline` holds the background workers. `src/ingest` and `src/stats` are
-the HTTP slices.
+The code is organised by feature. Each feature is one Nest module in one folder, with files named
+`<feature>.<role>.ts`; cross-cutting code lives outside `features/`:
+
+```
+src/
+  main.ts            bootstrap
+  app/               app.module (wiring) and app-setup (HTTP boundary: parser, pipe, filter)
+  config/            boot-time configuration validation
+  database/          the Mongo connection (global module)
+  common/
+    errors/          AppException base, the global exception filter, InvalidInputError
+    records/         the one repository, whose method names recite the atomic protocol, plus its
+                     types, errors and indexes - shared by every feature
+    clock.ts         the only source of business time
+    api.constants.ts routes and header names, declared once
+  features/
+    ingest/          POST /events: controller · dto · service · module, plus the pure canonical
+                     hashing (eventId) and the timestamp guard
+    pipeline/        the background loop: service · module · type (the ExternalProcessor port),
+                     the worker, reducer and reaper, and the pure fold / planReduction
+    stats/           GET /stats: controller · service · module
+```
+
+Tests sit next to the file they cover: `*.spec.ts` is pure (no Mongo), `*.integration-spec.ts`
+runs against a real Mongo. The pure files (`canonical`, `event-id`, `ts-bounds`, `fold`, `reduce`)
+import neither Nest nor the driver, so their specs run without a container or a database.
 
 A note on the two-word vocabulary of stage 2: `planReduction` decides which contiguous ready
 prefix to apply and whether it is safe to publish; `fold` is the pure accumulator that turns that
@@ -68,8 +90,8 @@ first `npm test` needs network and later runs do not). `MONGO_URI` is a suite-on
 
 ```bash
 npm ci
-npm test                # unit (pure domain) + integration (real Mongo)
-npm run test:unit       # pure domain only, no Mongo, sub-second
+npm test                # unit (pure logic) + integration (real Mongo)
+npm run test:unit       # pure logic only, no Mongo, sub-second
 npm run test:integration # integration only, against in-memory Mongo
 npm run chaos           # standalone crash demo (needs `docker compose up -d mongo` first)
 CHAOS_MODE=paced npm run chaos   # sustained-load variant at the real ~5s delay

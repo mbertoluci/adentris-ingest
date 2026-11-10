@@ -1,7 +1,7 @@
 import { Db, MongoClient } from 'mongodb';
 import { MongoMemoryServer } from 'mongodb-memory-server';
-import { ensureIndexes } from '../src/records/ensure-indexes';
-import { RECORDS_COLLECTION } from '../src/records/record.types';
+import { ensureIndexes } from '../src/common/records/ensure-indexes';
+import { RECORDS_COLLECTION } from '../src/common/records/records.type';
 
 // Pinned to the major of the compose image (mongo:7). Downloaded to the default cache on
 // first run; later runs are offline. Escape hatch: set MONGO_URI to point the suite at an
